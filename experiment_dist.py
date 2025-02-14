@@ -14,11 +14,13 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.ql_trainer import Trainer
-from decision_transformer.models.ql_DT import DecisionTransformer, Critic
+from decision_transformer.training.Dql_trainer import Trainer
+from decision_transformer.models.Dql_DT import DecisionTransformer, Critic
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 class TrainerConfig:
     # optimization parameters
@@ -413,13 +415,13 @@ if __name__ == '__main__':
     parser.add_argument('--mode', type=str, default='normal')  # normal for standard setting, delayed for sparse
     parser.add_argument('--K', type=int, default=20)
     parser.add_argument('--pct_traj', type=float, default=1.)
-    parser.add_argument('--batch_size', type=int, default=64) #256
-    parser.add_argument('--embed_dim', type=int, default=128) #256
-    parser.add_argument('--n_layer', type=int, default=3)  # 4
-    parser.add_argument('--n_head', type=int, default=1) # 4
+    parser.add_argument('--batch_size', type=int, default=256) #256
+    parser.add_argument('--embed_dim', type=int, default=256) #256
+    parser.add_argument('--n_layer', type=int, default=4)  # 4
+    parser.add_argument('--n_head', type=int, default=4) # 4
     parser.add_argument('--activation_function', type=str, default='relu')
     parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--learning_rate', '-lr', type=float, default=1e-4) #3e-4 
+    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) #3e-4 
     parser.add_argument('--lr_min', type=float, default=0.)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=10000)
@@ -439,8 +441,8 @@ if __name__ == '__main__':
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)
-    parser.add_argument("--k_rewards", action='store_true', default=False)
-    parser.add_argument("--use_discount", action='store_true', default=False)
+    parser.add_argument("--k_rewards", action='store_true', default=True)
+    parser.add_argument("--use_discount", action='store_true', default=True)
     parser.add_argument("--sar", action='store_true', default=False)
     parser.add_argument("--reward_tune", default='no', type=str)
     parser.add_argument("--scale", type=float, default=None)
