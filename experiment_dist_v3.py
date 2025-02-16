@@ -14,11 +14,13 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.ql_trainer import Trainer
-from decision_transformer.models.ql_DT import DecisionTransformer, Critic
+from decision_transformer.training.IQN_trainer_v3 import Trainer
+from decision_transformer.models.IQN_DT_v3 import DecisionTransformer, IQN
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class TrainerConfig:
     # optimization parameters
@@ -343,8 +345,8 @@ def experiment(
         rtg_no_q=variant['rtg_no_q'],
         infer_no_q=variant['infer_no_q']
     )
-    critic = Critic(
-        state_dim, act_dim, hidden_dim=variant['embed_dim']
+    critic = IQN(
+        state_dim, act_dim, layer_size=variant['embed_dim']
     )
 
 
@@ -406,7 +408,7 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', type=str, default='debug')
+    parser.add_argument('--exp_name', type=str, default='IQN-v3-lr')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
@@ -419,11 +421,11 @@ if __name__ == '__main__':
     parser.add_argument('--n_head', type=int, default=4) # 4
     parser.add_argument('--activation_function', type=str, default='relu')
     parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) #3e-4 
+    parser.add_argument('--learning_rate', '-lr', type=float, default=1e-4) #3e-4 
     parser.add_argument('--lr_min', type=float, default=0.)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=10000)
-    parser.add_argument('--num_eval_episodes', type=int, default=20)
+    parser.add_argument('--num_eval_episodes', type=int, default=30)
     parser.add_argument('--max_iters', type=int, default=500)
     parser.add_argument('--num_steps_per_iter', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cuda')
@@ -439,8 +441,8 @@ if __name__ == '__main__':
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)
-    parser.add_argument("--k_rewards", action='store_true', default=False) # False
-    parser.add_argument("--use_discount", action='store_true', default=False)
+    parser.add_argument("--k_rewards", action='store_true', default=True)
+    parser.add_argument("--use_discount", action='store_true', default=True)
     parser.add_argument("--sar", action='store_true', default=False)
     parser.add_argument("--reward_tune", default='no', type=str)
     parser.add_argument("--scale", type=float, default=None)
