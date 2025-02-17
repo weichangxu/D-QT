@@ -14,8 +14,8 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.C51_trainer import Trainer
-from decision_transformer.models.C51_DT import DecisionTransformer, Critic
+from decision_transformer.training.C51_trainer_v5 import Trainer
+from decision_transformer.models.C51_DT_v5 import DecisionTransformer, Critic
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
@@ -346,7 +346,7 @@ def experiment(
         infer_no_q=variant['infer_no_q']
     )
     critic = Critic(
-        state_dim, act_dim, hidden_dim=variant['embed_dim'],v_max=np.max(returns)/scale, v_min=np.min(returns)/scale
+        state_dim, act_dim, hidden_dim=variant['embed_dim'], v_max=np.max(returns)/scale, v_min=np.min(returns)/scale
     )
 
 
@@ -408,7 +408,7 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', type=str, default='C51-v1')
+    parser.add_argument('--exp_name', type=str, default='C51-v5')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
