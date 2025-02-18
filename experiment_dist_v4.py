@@ -14,8 +14,8 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.DIQN_trainer_v4 import Trainer
-from decision_transformer.models.DIQN_DT_v4 import DecisionTransformer, IQN
+from decision_transformer.training.DIQN_QT_trainer_v4 import Trainer
+from decision_transformer.models.DIQN_QT_v4 import DecisionTransformer, IQN
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 

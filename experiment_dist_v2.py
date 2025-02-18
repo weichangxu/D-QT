@@ -14,8 +14,8 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.IQN_trainer_v2 import Trainer
-from decision_transformer.models.IQN_DT_v2 import DecisionTransformer, IQN
+from decision_transformer.training.IQN_d4pg_trainer_v2 import Trainer
+from decision_transformer.models.IQN_d4pg_v2 import DecisionTransformer, IQN
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
@@ -408,7 +408,7 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', type=str, default='debug')
+    parser.add_argument('--exp_name', type=str, default='IQN_d4pg')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
@@ -425,7 +425,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr_min', type=float, default=0.)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=10000)
-    parser.add_argument('--num_eval_episodes', type=int, default=30)
+    parser.add_argument('--num_eval_episodes', type=int, default=10)
     parser.add_argument('--max_iters', type=int, default=500)
     parser.add_argument('--num_steps_per_iter', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cuda')
@@ -437,7 +437,7 @@ if __name__ == '__main__':
     parser.add_argument("--eta2", default=1.0, type=float)
     parser.add_argument("--lambda", default=1.0, type=float)
     parser.add_argument("--max_q_backup", action='store_true', default=False)
-    parser.add_argument("--lr_decay", action='store_true', default=False)
+    parser.add_argument("--lr_decay", action='store_true', default=True)
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)

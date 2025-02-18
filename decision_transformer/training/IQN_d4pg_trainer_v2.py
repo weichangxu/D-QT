@@ -56,6 +56,7 @@ class Trainer:
             ):
         
         self.actor = model
+        self.N = 32
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr, weight_decay=weight_decay)
 
         self.step_start_ema = step_start_ema
@@ -170,6 +171,7 @@ class Trainer:
         states, actions, rewards, action_target, dones, rtg, timesteps, attention_mask = self.get_batch(self.batch_size)
         # action_target = torch.clone(actions)
         batch_size = states.shape[0]
+        T = states.shape[1]
         state_dim = states.shape[-1]
         action_dim = actions.shape[-1]
         device = states.device
@@ -177,40 +179,38 @@ class Trainer:
 
         '''Q Training'''
         
-        current_q1_dist, current_q2_dist = self.critic(states, actions)
+        
+        Q_current, taus = self.critic(states, actions, self.N)
 
-        T = current_q1_dist.shape[1]
-        
-        
-        _, next_action, _ = self.ema_model(
+        with torch.no_grad():
+        #     _, next_actions, _ = self.actor(
+        #     states, actions, rewards, action_target, rtg[:,:-1], timesteps, attention_mask=attention_mask,
+        # ) # next_actions: [B, T, act_dim]
+            _, next_actions, _ = self.ema_model(
             states, actions, rewards, action_target, rtg[:,:-1], timesteps, attention_mask=attention_mask,
-        )
+        ) # next_actions: [B, T, act_dim]
+            Q_targets_next, _ = self.critic_target(states, next_actions, self.N) # [B*T, n_atom, 1]
+            Q_targets_next = Q_targets_next.transpose(1,2) # [B*T, 1 n_atom]
+            Q_targets = rewards.view(-1,1).unsqueeze(1) + self.discount * Q_targets_next * (1. - dones.view(-1,1).unsqueeze(1)) # [B*T, 1 n_atom]
         
         
-        target_q1_dist, target_q2_dist = self.critic_target(states, next_action)
-    
-        # 计算最小 Q 值的概率分布
-        # target_q_dist = self.critic.min(target_q1_dist, target_q2_dist) 
-        if np.random.uniform() > 0.5:
-            target_q_dist = target_q1_dist
-        else:
-            target_q_dist = target_q2_dist
-        # 计算目标 Q 值分布（投影到 self.support）
-        target_q_dist = self.critic.compute_target_distribution(rewards, dones, target_q_dist, self.discount)
-        target_q = (target_q_dist * self.critic.support.to(target_q_dist.device)).sum(dim=-1)  
 
-    
-        loss_q1 = -(target_q_dist[:, :-1][attention_mask[:, :-1]>0] * current_q1_dist[:, :-1][attention_mask[:, :-1]>0].log()).sum(dim=-1).mean()
-        loss_q2 = -(target_q_dist[:, :-1][attention_mask[:, :-1]>0] * current_q2_dist[:, :-1][attention_mask[:, :-1]>0].log()).sum(dim=-1).mean()
-        
-        critic_loss = loss_q1 + loss_q2
+        assert Q_targets.shape == (batch_size * T, 1, self.N)
+        assert Q_current.shape == (batch_size * T, self.N, 1)
 
+        td_error = Q_targets - Q_current
+        assert td_error.shape == (batch_size * T, self.N, self.N), "wrong td error shape"
+        huber_l = self.calculate_huber_loss(td_error, 1.0) # [B*T, n_atom, n_atom]
+        quantil_l = abs(taus -(td_error.detach() < 0).float()) * huber_l / 1.0
 
+        critic_loss = quantil_l.sum(dim=1)[attention_mask.reshape(-1) > 0].mean(dim=1).mean()
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         if self.grad_norm > 0:
             critic_grad_norms = nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_norm, norm_type=2)
         self.critic_optimizer.step()
+
+        
 
         '''Policy Training'''        
         state_preds, action_preds, reward_preds = self.actor.forward(
@@ -234,17 +234,12 @@ class Trainer:
 
         actor_states = states.reshape(-1, state_dim)[attention_mask.reshape(-1) > 0]
 
+        q_new_action = self.critic.get_qvalues(actor_states, action_preds_)
+        q_loss = - q_new_action.mean() * 0.01
 
 
-        q1_dist, q2_dist = self.critic(actor_states, action_preds_)
-        q1_mean = (q1_dist * self.critic.support.to(actor_states.device)).sum(dim=-1)
-        q2_mean = (q2_dist * self.critic.support.to(actor_states.device)).sum(dim=-1)
-        if np.random.uniform() > 0.5:
-            q_loss = - q1_mean.mean()/ q2_mean.abs().mean().detach()
-        else:
-            q_loss = - q2_mean.mean()/ q1_mean.abs().mean().detach()
 
-        # q_loss = - q1_mean.mean()/ q2_mean.abs().mean().detach() - q2_mean.mean()/ q1_mean.abs().mean().detach()
+
 
         
         actor_loss = self.eta2 * bc_loss + self.eta * q_loss
@@ -264,6 +259,8 @@ class Trainer:
         
         self.step += 1
 
+
+        """ log """
         with torch.no_grad():
             self.diagnostics['training/action_error'] = torch.mean((action_preds-action_target)**2).detach().cpu().item()
 
@@ -274,16 +271,24 @@ class Trainer:
             log_writer.add_scalar('BC Loss', bc_loss.item(), self.step)
             log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
             log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
-            log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
+            # log_writer.add_scalar('Target_Q Mean', target_q_mean.mean().item(), self.step)
 
         loss_metric['bc_loss'].append(bc_loss.item())
         loss_metric['ql_loss'].append(q_loss.item())
         loss_metric['critic_loss'].append(critic_loss.item())
         loss_metric['actor_loss'].append(actor_loss.item())
-        loss_metric['target_q_mean'].append(target_q.mean().item())  # 记录均值
+        # loss_metric['target_q_mean'].append(target_q_mean.mean().item())  # 记录均值
 
         # loss_metric['target_q_mean'].append(target_q.mean().item())
 
         return loss_metric
+    
+    def calculate_huber_loss(self, td_errors, k=1.0):
+        """
+        Calculate huber loss element-wisely depending on kappa k.
+        """
+        loss = torch.where(td_errors.abs() <= k, 0.5 * td_errors.pow(2), k * (td_errors.abs() - 0.5 * k))
+        assert loss.shape == (td_errors.shape[0], 32, 32), "huber loss has wrong shape"
+        return loss
     
     

@@ -248,13 +248,18 @@ class Trainer:
         q_new_action = self.critic.get_qvalues(actor_states, action_preds_)
         q_loss = - q_new_action.mean() * 0.01
 
+        # 2-17
+        # q_loss = - q_new_action.mean()
 
 
 
+        # 2-17
+        # actor_loss = bc_loss / bc_loss.detach() +  q_loss/ q_loss.detach()
 
         
         actor_loss = self.eta2 * bc_loss + self.eta * q_loss
-        # actor_loss = self.eta * bc_loss + q_loss
+
+
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -296,13 +301,5 @@ class Trainer:
         # loss_metric['target_q_mean'].append(target_q.mean().item())
 
         return loss_metric
-    
-    def calculate_huber_loss(self, td_errors, k=1.0):
-        """
-        Calculate huber loss element-wisely depending on kappa k.
-        """
-        loss = torch.where(td_errors.abs() <= k, 0.5 * td_errors.pow(2), k * (td_errors.abs() - 0.5 * k))
-        assert loss.shape == (td_errors.shape[0], 32, 32), "huber loss has wrong shape"
-        return loss
     
     

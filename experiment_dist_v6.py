@@ -14,12 +14,13 @@ import pathlib
 import time
 
 from decision_transformer.evaluation.evaluate_episodes import evaluate_episode_rtg
-from decision_transformer.training.ql_trainer import Trainer
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+from decision_transformer.training.deep_IQN_trainer_v6 import Trainer
+from decision_transformer.models.deep_IQN_QT_v6 import DecisionTransformer, IQN
 from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class TrainerConfig:
     # optimization parameters
@@ -72,28 +73,7 @@ def experiment(
     seed = variant['seed']
     group_name = f'{exp_prefix}-{env_name}-{dataset}'
     timestr = time.strftime("%y%m%d-%H%M%S")
-    exp_prefix = f'{group_name}-{timestr}-{seed}'
-    exp = variant['exp']
-    lr = variant['learning_rate']
-    clr = variant['critic_learning_rate']
-    grad_norm = variant['grad_norm']
-    eta = variant['eta']
-
-    if exp == 'QT' or exp == 'QT_pro':
-        from decision_transformer.models.ql_DT import DecisionTransformer, Critic
-    elif exp == 'C51':
-        from decision_transformer.models.C51_DT_v5 import DecisionTransformer, Critic
-    elif exp == 'IQN_d4pg':
-        from decision_transformer.models.IQN_d4pg_v2 import DecisionTransformer, IQN
-    elif exp == 'IQN_QT':
-        from decision_transformer.models.IQN_QT_v3 import DecisionTransformer, IQN
-    
-
-    log_details = f'{exp}_{env_name}_{dataset}_{timestr}_seed{seed}_lr{lr}_clr{clr}_gd{grad_norm}_eta{eta}'
-    # if variant['log_to_tensorboard']:
-    #     tensorboard_path = f'log/{exp}/{env_name}/{log_details}' 
-    # else:
-    #     tensorboard_path = None
+    exp_prefix = f'{group_name}-{seed}-{timestr}'
 
     if env_name == 'hopper':
         dversion = 2
@@ -188,22 +168,17 @@ def experiment(
     variant['scale'] = scale
     if variant['test_scale'] is None:
         variant['test_scale'] = scale
-    
-    save_path = variant['save_path']
-    save_path = f'{save_path}/{exp}/{env_name}/{dataset}/'
-    if not os.path.exists(os.path.join(save_path, exp_prefix)):
+
+    if not os.path.exists(os.path.join(variant['save_path'], exp_prefix)):
         pathlib.Path(
-        save_path +
+        args.save_path +
         exp_prefix).mkdir(
         parents=True,
         exist_ok=True)
-    setup_logger(exp_prefix, variant=variant, log_dir=os.path.join(save_path, exp_prefix))
+    setup_logger(exp_prefix, variant=variant, log_dir=os.path.join(variant['save_path'], exp_prefix))
 
-    
-    if variant['log_to_tensorboard']:
-        writer = SummaryWriter(os.path.join(save_path, exp_prefix, log_details))
-    else:
-        writer = None
+    # writer = SummaryWriter(os.path.join(variant['save_path'], exp_prefix))
+    writer = None
 
 
     env.seed(variant['seed'])
@@ -370,25 +345,9 @@ def experiment(
         rtg_no_q=variant['rtg_no_q'],
         infer_no_q=variant['infer_no_q']
     )
-    if exp == 'QT' or exp == 'QT_pro':
-        critic = Critic(
-            state_dim, act_dim, hidden_dim=variant['embed_dim']
-        )    
-    elif exp == 'C51':
-        critic = Critic(
-            state_dim, act_dim, hidden_dim=variant['embed_dim'], v_max=np.max(returns), v_min=0
-        ) 
-    elif exp == 'IQN_d4pg':
-        critic = IQN(
-            state_dim, act_dim, layer_size=variant['embed_dim']
-        )
-    elif exp == 'IQN_QT':
-        critic = IQN(
-            state_dim, act_dim, layer_size=variant['embed_dim']
-        )
-
-    
-    
+    critic = IQN(
+        state_dim, act_dim, layer_size=variant['embed_dim']
+    )
 
 
     model = model.to(device=device)
@@ -406,12 +365,10 @@ def experiment(
         max_q_backup=variant['max_q_backup'],
         eta=variant['eta'],
         eta2=variant['eta2'],
-        exp=variant['exp'],
         ema_decay=0.995,
         step_start_ema=1000,
         update_ema_every=5,
         lr=variant['learning_rate'],
-        clr=variant['critic_learning_rate'],
         weight_decay=variant['weight_decay'],
         lr_decay=variant['lr_decay'],
         lr_maxt=variant['max_iters'],
@@ -438,7 +395,7 @@ def experiment(
                 'actor': trainer.actor.state_dict(),
                 'critic': trainer.critic_target.state_dict(),
             }
-            save_checkpoint(state, os.path.join(save_path, exp_prefix, 'epoch_{}.pth'.format(iter + 1)))
+            save_checkpoint(state, os.path.join(variant['save_path'], exp_prefix, 'epoch_{}.pth'.format(iter + 1)))
             best_ret = ret
             best_nor_ret = nor_ret
             best_iter = iter + 1
@@ -451,7 +408,7 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default='QT_pro')
+    parser.add_argument('--exp_name', type=str, default='deep-IQN-v6')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
@@ -464,19 +421,15 @@ if __name__ == '__main__':
     parser.add_argument('--n_head', type=int, default=4) # 4
     parser.add_argument('--activation_function', type=str, default='relu')
     parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) #3e-4
-    parser.add_argument('--critic_learning_rate', '-clr', type=float, default=3e-4) #3e-4
-
+    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) #3e-4 
     parser.add_argument('--lr_min', type=float, default=0.)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=10000)
-    parser.add_argument('--num_eval_episodes', type=int, default=20)
+    parser.add_argument('--num_eval_episodes', type=int, default=30)
     parser.add_argument('--max_iters', type=int, default=500)
     parser.add_argument('--num_steps_per_iter', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_path', type=str, default='./save/')
-    parser.add_argument('--log_to_tensorboard', type=bool, default=True)
-
 
     parser.add_argument("--discount", default=0.99, type=float)
     parser.add_argument("--tau", default=0.005, type=float)
@@ -488,7 +441,7 @@ if __name__ == '__main__':
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)
-    parser.add_argument("--k_rewards", action='store_true', default=True) # False
+    parser.add_argument("--k_rewards", action='store_true', default=True)
     parser.add_argument("--use_discount", action='store_true', default=True)
     parser.add_argument("--sar", action='store_true', default=False)
     parser.add_argument("--reward_tune", default='no', type=str)
@@ -499,4 +452,4 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
-    experiment(args.exp, variant=vars(args))
+    experiment(args.exp_name, variant=vars(args))

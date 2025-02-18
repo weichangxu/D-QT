@@ -109,6 +109,7 @@ class Trainer:
             'actor_loss': [],
             'critic_loss': [],
             'target_q_mean': [],
+            'current_q_mean': [],
         }
         for _ in trange(num_steps):
             loss_metric = self.train_step(log_writer, loss_metric)
@@ -122,6 +123,7 @@ class Trainer:
         logger.record_tabular('Actor Loss', np.mean(loss_metric['actor_loss']))
         logger.record_tabular('Critic Loss', np.mean(loss_metric['critic_loss']))
         logger.record_tabular('Target Q Mean', np.mean(loss_metric['target_q_mean']))
+        logger.record_tabular('Current Q Mean', np.mean(loss_metric['current_q_mean']))
         logger.dump_tabular()
 
         logs['time/training'] = time.time() - train_start
@@ -180,27 +182,39 @@ class Trainer:
         '''Q Training'''
         
         
-        Q_current, taus = self.critic(states, actions, self.N)
+        current_q = self.critic.get_qvalues(states, actions) # [B*T, 1]
+        current_q = current_q.reshape(batch_size, -1, 1)
 
-        with torch.no_grad():
-            _, next_actions, _ = self.actor(
+        _, next_action, _ = self.ema_model(
             states, actions, rewards, action_target, rtg[:,:-1], timesteps, attention_mask=attention_mask,
-        ) # next_actions: [B, T, act_dim]
-            Q_targets_next, _ = self.critic_target(states, next_actions, self.N)
-            Q_targets_next = Q_targets_next.transpose(1,2)
-            Q_targets = rewards.view(-1,1).unsqueeze(1) + self.discount * Q_targets_next * (1. - dones.view(-1,1).unsqueeze(1))
+        )
+
+        critic_next_states = states[:, -1]
+        next_action = next_action[:, -1]
+        target_q = self.critic_target.get_qvalues(critic_next_states, next_action) #[B, 1]
+
+        not_done =(1 - dones[:, -1]) # [B, 1]
+
+        rewards[:, -1] = 0.
+        mask_ = attention_mask.sum(dim=1).detach().cpu() # [B]
+        discount = [i - 1 - torch.arange(i) for i in mask_]
+        discount = torch.stack([torch.cat([i, torch.zeros(T - len(i))], dim=0) for i in discount], dim=0) # [B, T]
+        discount = (self.discount ** discount).unsqueeze(-1).to(device) # [B, T, 1]
+        k_rewards = torch.cumsum(rewards.flip(dims=[1]) * discount, dim=1).flip(dims=[1]) # [B, T, 1]
+
+        discount = [torch.arange(i) for i in mask_] # 
+        discount = torch.stack([torch.cat([torch.zeros(T - len(i)), i], dim=0) for i in discount], dim=0)
+        discount =  (self.discount ** discount).unsqueeze(-1).to(device)
+        k_rewards = k_rewards / discount
         
+        discount = [i - 1 - torch.arange(i) for i in mask_] # [B]
+        discount = torch.stack([torch.cat([torch.zeros(T - len(i)), i], dim=0) for i in discount], dim=0)
+        discount = (self.discount ** discount).to(device) # [B, T]
+        target_q = (k_rewards + (not_done * discount * target_q).unsqueeze(-1)).detach() # [B, T, 1]
+
+        critic_loss = F.mse_loss(current_q[:, :-1][attention_mask[:, :-1]>0], target_q[:, :-1][attention_mask[:, :-1]>0])
+
         
-
-        assert Q_targets.shape == (batch_size * T, 1, self.N)
-        assert Q_current.shape == (batch_size * T, self.N, 1)
-
-        td_error = Q_targets - Q_current
-        assert td_error.shape == (batch_size * T, self.N, self.N), "wrong td error shape"
-        huber_l = self.calculate_huber_loss(td_error, 1.0)
-        quantil_l = abs(taus -(td_error.detach() < 0).float()) * huber_l / 1.0
-
-        critic_loss = quantil_l.sum(dim=1).mean(dim=1).mean()
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         if self.grad_norm > 0:
@@ -232,15 +246,16 @@ class Trainer:
         actor_states = states.reshape(-1, state_dim)[attention_mask.reshape(-1) > 0]
 
         q_new_action = self.critic.get_qvalues(actor_states, action_preds_)
-        q_loss = - q_new_action.mean() * 0.01
-
-
-
-
+        
 
         
+        # q_loss = - q_new_action.mean()
+        # actor_loss = bc_loss / bc_loss.detach() +  q_loss/ q_new_action.abs().mean().detach()
+
+        q_loss = - q_new_action.mean() * 0.01
         actor_loss = self.eta2 * bc_loss + self.eta * q_loss
-        # actor_loss = self.eta * bc_loss + q_loss
+
+
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -268,13 +283,16 @@ class Trainer:
             log_writer.add_scalar('BC Loss', bc_loss.item(), self.step)
             log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
             log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
-            # log_writer.add_scalar('Target_Q Mean', target_q_mean.mean().item(), self.step)
+            log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
+            log_writer.add_scalar('Current_Q Mean', current_q.mean().item(), self.step)
+
 
         loss_metric['bc_loss'].append(bc_loss.item())
         loss_metric['ql_loss'].append(q_loss.item())
         loss_metric['critic_loss'].append(critic_loss.item())
         loss_metric['actor_loss'].append(actor_loss.item())
-        # loss_metric['target_q_mean'].append(target_q_mean.mean().item())  # 记录均值
+        loss_metric['target_q_mean'].append(target_q.mean().item())  # 记录均值
+        loss_metric['current_q_mean'].append(current_q.mean().item())
 
         # loss_metric['target_q_mean'].append(target_q.mean().item())
 

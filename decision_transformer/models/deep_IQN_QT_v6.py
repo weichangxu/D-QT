@@ -8,84 +8,109 @@ import transformers
 from decision_transformer.models.model import TrajectoryModel
 from decision_transformer.models.trajectory_gpt2 import GPT2Model
 
-class Critic(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=256, num_atoms=5, v_min=0, v_max=3300):
-        super(Critic, self).__init__()
+class IQN(nn.Module):
+    def __init__(self, state_size, action_size, layer_size, seed=123, N=32, dueling=False, device="cuda:0"):
+        super(IQN, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.input_shape = state_size
+        self.action_size = action_size
+        self.input_dim = action_size+state_size+layer_size
+        self.N = N  
+        self.n_cos = 64
+        self.layer_size = layer_size
+        self.pis = torch.FloatTensor([np.pi*i for i in range(1,self.n_cos+1)]).view(1,1,self.n_cos).to(device) # Starting from 0 as in the paper 
+        self.dueling = dueling
+        self.device = device
 
-        self.num_atoms = num_atoms
-        self.v_min = v_min
-        self.v_max = v_max
-        self.support = torch.linspace(v_min, v_max, num_atoms)
+        # Network Architecture
 
-        self.q1_model = nn.Sequential(
-            nn.Linear(state_dim + action_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, num_atoms)  # 输出 Q 值的概率分布
-        )
-
-        self.q2_model = nn.Sequential(
-            nn.Linear(state_dim + action_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, num_atoms)  # 输出 Q 值的概率分布
-        )
-
-    def forward(self, state, action):
-        x = torch.cat([state, action], dim=-1)
-        q1_dist = self.q1_model(x)
-        q1_dist = F.softmax(q1_dist, dim=-1)  # 归一化为概率分布
-        q2_dist = self.q2_model(x)
-        q2_dist = F.softmax(q2_dist, dim=-1)
-        return q1_dist, q2_dist
-
-    def q_min(self, state, action):
-        q1_dist, q2_dist = self.forward(state, action)
-        q1 = (q1_dist * self.support.to(state.device)).sum(dim=-1)  # 计算期望 Q 值
-        q2 = (q2_dist * self.support.to(state.device)).sum(dim=-1)
-        return torch.min(q1, q2)
+        self.head = nn.Linear(self.action_size+self.input_shape, layer_size) 
+        self.ff_1 = nn.Linear(self.input_dim, layer_size)
+        self.ff_2 = nn.Linear(self.input_dim, layer_size)
+        self.cos_embedding = nn.Linear(self.n_cos, layer_size)
+        self.ff_3 = nn.Linear(self.input_dim, layer_size)
+        self.ff_4 = nn.Linear(self.layer_size, 1)       
+        #weight_init([self.head_1, self.ff_1])
     
-    def min(self, q1_dist, q2_dist):
-        q1_mean = (q1_dist * self.support.to(q1_dist.device)).sum(dim=-1)  # [B]
-        q2_mean = (q2_dist * self.support.to(q2_dist.device)).sum(dim=-1)  # [B]
-        target_q_dist = torch.where(q1_mean.unsqueeze(-1) < q2_mean.unsqueeze(-1), q1_dist, q2_dist)
-        return target_q_dist
+    def calc_input_layer(self):
+        x = torch.zeros(self.input_shape).unsqueeze(0)
+        x = self.head(x)
+        return x.flatten().shape[0]
+        
+    def calc_cos(self, batch_size, n_tau=32):
+        """
+        Calculating the cosinus values depending on the number of tau samples
+        """
+        taus = torch.rand(batch_size, n_tau).unsqueeze(-1).to(self.device) #(batch_size, n_tau, 1)  .to(self.device)
+        cos = torch.cos(taus*self.pis)
+
+        assert cos.shape == (batch_size,n_tau,self.n_cos), "cos shape is incorrect"
+        return cos, taus
     
-    def compute_target_distribution(self, rewards, dones, target_q_dist, discount):
-        rewards = rewards.squeeze(-1)
-        dones = dones.squeeze(-1)
+    def forward(self, input, action, num_tau=32):
+        """
+        Quantile Calculation depending on the number of tau
+        
+        Return:
+        quantiles [ shape of (batch_size, num_tau, action_size)]
+        taus [shape of ((batch_size, num_tau, 1))]
+        
+        """
+        
+        if input.dim() == 2:
+            batch_size = input.shape[0]
+            Batch_Size = batch_size
+        elif input.dim() == 3:
+            batch_size = input.shape[0]
+            T = input.shape[1]
+            Batch_Size = batch_size * T
 
-        batch_size, T = rewards.shape  # 确保 rewards 形状正确
-        num_atoms = self.num_atoms
+            input = input.view(Batch_Size, -1)
+            action = action.view(Batch_Size, -1)
 
+        
+
+
+        xs = torch.cat((input, action), dim=1)
+        x = torch.relu(self.head(xs))
+        x = torch.cat((x, xs), dim=1)
+        x = torch.relu(self.ff_1(x))
+        x = torch.cat((x, xs), dim=1)
+        x = torch.relu(self.ff_2(x))
+        
+        cos, taus = self.calc_cos(Batch_Size, num_tau) # cos shape (batch, num_tau, layer_size)
+        cos = cos.view(Batch_Size * num_tau, self.n_cos)
+        cos_x = torch.relu(self.cos_embedding(cos)).view(Batch_Size, num_tau, self.layer_size) # (batch, n_tau, layer)
+        
+        # x has shape (batch, layer_size) for multiplication –> reshape to (batch, 1, layer)
+        x = (x.unsqueeze(1)*cos_x).view(Batch_Size * num_tau, self.layer_size)  #batch_size*num_tau, self.cos_layer_out
+        # Following reshape and transpose is done to bring the action in the same shape as batch*tau:
+        # first 32 entries are tau for each action -> thats why each action one needs to be repeated 32 times 
+        # x = [[tau1   action = [[a1
+        #       tau1              a1   
+        #        ..               ..
+        #       tau2              a2
+        #       tau2              a2
+        #       ..]]              ..]]  
+        action = action.repeat(num_tau,1).reshape(num_tau,Batch_Size*self.action_size).transpose(0,1).reshape(Batch_Size*num_tau,self.action_size)
+        state = input.repeat(num_tau,1).reshape(num_tau,Batch_Size*self.input_shape).transpose(0,1).reshape(Batch_Size*num_tau,self.input_shape)        
+        
+
+        x = torch.cat((x,action,state),dim=1)
+        x = torch.relu(self.ff_3(x))
+
+        out = self.ff_4(x)
+        
+        
+        return out.view(Batch_Size, num_tau, 1), taus
     
-        # 计算目标支持集的 Q 值
-        z_target = rewards.unsqueeze(-1) + discount * self.support.to(rewards.device).view(1, 1, -1) * (1 - dones.unsqueeze(-1))
-        z_target = z_target.clamp(self.v_min, self.v_max)
+    def get_qvalues(self, inputs, action):
+        quantiles, _ = self.forward(inputs, action, self.N)
+        actions = quantiles.mean(dim=1)
+        return actions  
 
-        # 计算投影索引
-        b = (z_target - self.v_min) / (self.v_max - self.v_min) * (num_atoms - 1)
-        lower_idx = b.floor().long()
-        upper_idx = b.ceil().long()
 
-        lower_idx = lower_idx.clamp(0, num_atoms - 1)
-        upper_idx = upper_idx.clamp(0, num_atoms - 1)
 
-        # 初始化目标分布
-        target_distribution = torch.zeros(batch_size, T, num_atoms, device=rewards.device)
-
-        # 计算线性插值加权分布
-        offset = torch.linspace(0, (batch_size - 1) * T * num_atoms, batch_size * T, dtype=torch.long, device=rewards.device).view(batch_size, T, 1)
-        target_distribution.view(-1).index_add_(0, (lower_idx + offset).view(-1), (target_q_dist * (upper_idx.float() - b)).view(-1))
-        target_distribution.view(-1).index_add_(0, (upper_idx + offset).view(-1), (target_q_dist * (b - lower_idx.float())).view(-1))
-
-        return target_distribution
 
 
 
@@ -249,15 +274,15 @@ class DecisionTransformer(TrajectoryModel):
             attention_mask = None
 
         returns_to_go[bs:, -1] = returns_to_go[bs:, -1] + torch.randn_like(returns_to_go[bs:, -1]) * 0.1
-        if not self.rtg_no_q:
-            returns_to_go[-1, -1] = critic.q_min(states[-1:, -2], actions[-1:, -2]).flatten() - rewards[-1, -2] / self.scale
+        # if not self.rtg_no_q:
+        #     returns_to_go[-1, -1] = critic.q_min(states[-1:, -2], actions[-1:, -2]).flatten() - rewards[-1, -2] / self.scale
         _, action_preds, return_preds = self.forward(states, actions, rewards, None, returns_to_go=returns_to_go, timesteps=timesteps, attention_mask=attention_mask, **kwargs)
     
         
         state_rpt = states[:, -1, :]
         action_preds = action_preds[:, -1, :]
 
-        q_value = critic.q_min(state_rpt, action_preds).flatten()
+        q_value = critic.get_qvalues(state_rpt, action_preds).flatten()
         idx = torch.multinomial(F.softmax(q_value, dim=-1), 1)
 
         if not self.infer_no_q:

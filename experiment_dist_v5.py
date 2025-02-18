@@ -20,7 +20,7 @@ from logger import logger, setup_logger
 from torch.utils.tensorboard import SummaryWriter
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class TrainerConfig:
     # optimization parameters
@@ -345,10 +345,12 @@ def experiment(
         rtg_no_q=variant['rtg_no_q'],
         infer_no_q=variant['infer_no_q']
     )
+    # critic = Critic(
+    #     state_dim, act_dim, hidden_dim=variant['embed_dim'], v_max=np.max(returns)/scale, v_min=0
+    # )
     critic = Critic(
-        state_dim, act_dim, hidden_dim=variant['embed_dim'], v_max=np.max(returns)/scale, v_min=np.min(returns)/scale
+        state_dim, act_dim, hidden_dim=variant['embed_dim'], v_max=np.max(returns), v_min=0
     )
-
 
     model = model.to(device=device)
     critic = critic.to(device=device)
@@ -408,14 +410,14 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp_name', type=str, default='C51-v5')
+    parser.add_argument('--exp_name', type=str, default='debug')
     parser.add_argument('--seed', type=int, default=123)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
     parser.add_argument('--mode', type=str, default='normal')  # normal for standard setting, delayed for sparse
-    parser.add_argument('--K', type=int, default=20)
+    parser.add_argument('--K', type=int, default=4)
     parser.add_argument('--pct_traj', type=float, default=1.)
-    parser.add_argument('--batch_size', type=int, default=256) #256
+    parser.add_argument('--batch_size', type=int, default=3) #256
     parser.add_argument('--embed_dim', type=int, default=256) #256
     parser.add_argument('--n_layer', type=int, default=4)  # 4
     parser.add_argument('--n_head', type=int, default=4) # 4
@@ -425,9 +427,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr_min', type=float, default=0.)
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
     parser.add_argument('--warmup_steps', type=int, default=10000)
-    parser.add_argument('--num_eval_episodes', type=int, default=10)
-    parser.add_argument('--max_iters', type=int, default=500)
-    parser.add_argument('--num_steps_per_iter', type=int, default=1000)
+    parser.add_argument('--num_eval_episodes', type=int, default=2)
+    parser.add_argument('--max_iters', type=int, default=200)
+    parser.add_argument('--num_steps_per_iter', type=int, default=10)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--save_path', type=str, default='./save/')
 
@@ -437,7 +439,7 @@ if __name__ == '__main__':
     parser.add_argument("--eta2", default=1.0, type=float)
     parser.add_argument("--lambda", default=1.0, type=float)
     parser.add_argument("--max_q_backup", action='store_true', default=False)
-    parser.add_argument("--lr_decay", action='store_true', default=False)
+    parser.add_argument("--lr_decay", action='store_true', default=True)
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)
