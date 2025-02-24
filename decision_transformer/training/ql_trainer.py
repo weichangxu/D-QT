@@ -48,9 +48,10 @@ class Trainer:
                 lr=3e-4,
                 clr=3e-4,
                 weight_decay=1e-4,
+                warmup_steps=0,
                 lr_decay=False,
-                lr_maxt=100000,
-                lr_min=0.,
+                decay_start_step=10000,
+                decay_rate=0.1,
                 grad_norm=1.0,
                 scale=1.0,
                 k_rewards=True,
@@ -64,14 +65,32 @@ class Trainer:
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.actor)
         self.update_ema_every = update_ema_every
+        self.warmup_steps = warmup_steps
 
         self.critic = critic
         self.critic_target = copy.deepcopy(self.critic)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=clr)
 
+        self.decay_start_step = decay_start_step
+        self.decay_rate = decay_rate
+
         if lr_decay:
-            self.actor_lr_scheduler = CosineAnnealingLR(self.actor_optimizer, T_max=lr_maxt, eta_min=lr_min)
-            self.critic_lr_scheduler = CosineAnnealingLR(self.critic_optimizer, T_max=lr_maxt, eta_min=lr_min)
+            # self.actor_lr_scheduler = CosineAnnealingLR(self.actor_optimizer, T_max=lr_maxt, eta_min=lr_min)
+            # self.critic_lr_scheduler = CosineAnnealingLR(self.critic_optimizer, T_max=lr_maxt, eta_min=lr_min)
+            def lr_lambda(epoch):
+                if epoch < self.decay_start_step:
+                    return 1.0  # 学习率保持不变
+                else:
+                    return 0.9 ** ((epoch - self.decay_start_step)*self.decay_rate)
+                
+            self.actor_lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.actor_optimizer, lr_lambda)
+            self.critic_lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.critic_optimizer, lr_lambda)
+        
+        if warmup_steps != 0:
+            self.actor_lr_scheduler_warm = torch.optim.lr_scheduler.LambdaLR(self.actor_optimizer, lambda steps: min((steps+1)/warmup_steps, 1))
+            self.critic_lr_scheduler_warm = torch.optim.lr_scheduler.LambdaLR(self.actor_optimizer, lambda steps: min((steps+1)/warmup_steps, 1))
+            
+
 
         self.batch_size = batch_size
         self.get_batch = get_batch
@@ -122,12 +141,16 @@ class Trainer:
                 loss_metric = self.train_step_IQN_d4pg(log_writer, loss_metric)
             elif self.exp == 'IQN_QT':
                 loss_metric = self.train_step_IQN_QT(log_writer, loss_metric)
-
+            elif self.exp == 'DIQN_QT':
+                loss_metric = self.train_step_DIQN_QT(log_writer, loss_metric)
 
         
-        if self.lr_decay: 
-            self.actor_lr_scheduler.step()
-            self.critic_lr_scheduler.step()
+        
+        # if self.lr_decay and self.step > self.warmup_steps: 
+        #     self.actor_lr_scheduler.step()
+        #     # print('Current actor learning rate', self.actor_optimizer.param_groups[0]['lr'])
+        #     self.critic_lr_scheduler.step()
+
 
         logger.record_tabular('BC Loss', np.mean(loss_metric['bc_loss']))
         logger.record_tabular('QL Loss', np.mean(loss_metric['ql_loss']))
@@ -303,6 +326,13 @@ class Trainer:
             actor_grad_norms = nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_norm, norm_type=2)
         self.actor_optimizer.step()
 
+        if self.warmup_steps !=0 and self.step <= self.warmup_steps:
+            self.actor_lr_scheduler_warm.step()
+            self.critic_lr_scheduler_warm.step()
+        
+        # print('Current actor learning rate', self.actor_optimizer.param_groups[0]['lr'])
+
+
         """ Step Target network """
         self.step_ema()
 
@@ -322,6 +352,9 @@ class Trainer:
             log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
             log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
             log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
+            log_writer.add_scalar('Actor LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+            log_writer.add_scalar('Critic LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+
 
         loss_metric['bc_loss'].append(bc_loss.item())
         loss_metric['ql_loss'].append(q_loss.item())
@@ -683,6 +716,21 @@ class Trainer:
             actor_grad_norms = nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_norm, norm_type=2)
         self.actor_optimizer.step()
 
+        if self.warmup_steps !=0:
+            if self.step <= self.warmup_steps:
+                self.actor_lr_scheduler_warm.step()
+                self.critic_lr_scheduler_warm.step()
+            else:
+                if self.lr_decay:
+                    self.actor_lr_scheduler.step()
+                    self.critic_lr_scheduler.step()
+
+        else:
+            if self.lr_decay:
+                self.actor_lr_scheduler.step()
+                self.critic_lr_scheduler.step()
+       
+        
         """ Step Target network """
         self.step_ema()
 
@@ -704,6 +752,9 @@ class Trainer:
             log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
             log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
             log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
+            log_writer.add_scalar('Actor LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+            log_writer.add_scalar('Critic LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+
             # log_writer.add_scalar('Current_Q Mean', current_q.mean().item(), self.step)
 
 
@@ -718,5 +769,159 @@ class Trainer:
 
         return loss_metric
     
+    def train_step_DIQN_QT(self, log_writer=None, loss_metric={}):
+        '''
+            Train the model for one step
+            states: (batch_size, max_len, state_dim)
+        '''
+        states, actions, rewards, action_target, dones, rtg, timesteps, attention_mask = self.get_batch(self.batch_size)
+        # action_target = torch.clone(actions)
+        batch_size = states.shape[0]
+        T = states.shape[1]
+        state_dim = states.shape[-1]
+        action_dim = actions.shape[-1]
+        device = states.device
+
+
+        '''Q Training'''
+        
+        
+        current_q1, current_q2 = self.critic.get_qvalues(states, actions) # [B*T, 1]
+        current_q1 = current_q1.reshape(batch_size, -1, 1)
+        current_q2 = current_q2.reshape(batch_size, -1, 1)
+        
+
+        _, next_action, _ = self.ema_model(
+            states, actions, rewards, action_target, rtg[:,:-1], timesteps, attention_mask=attention_mask,
+        )
+
+        critic_next_states = states[:, -1]
+        next_action = next_action[:, -1]
+        target_q1, target_q2 = self.critic_target.get_qvalues(critic_next_states, next_action) #[B, 1]
+
+        # target_q = torch.min(target_q1, target_q2)
+        if np.random.uniform() > 0.5:
+            target_q = target_q1
+        else:
+            target_q = target_q2
+
+        not_done =(1 - dones[:, -1]) # [B, 1]
+
+        rewards[:, -1] = 0.
+        mask_ = attention_mask.sum(dim=1).detach().cpu() # [B]
+        discount = [i - 1 - torch.arange(i) for i in mask_]
+        discount = torch.stack([torch.cat([i, torch.zeros(T - len(i))], dim=0) for i in discount], dim=0) # [B, T]
+        discount = (self.discount ** discount).unsqueeze(-1).to(device) # [B, T, 1]
+        k_rewards = torch.cumsum(rewards.flip(dims=[1]) * discount, dim=1).flip(dims=[1]) # [B, T, 1]
+
+        discount = [torch.arange(i) for i in mask_] # 
+        discount = torch.stack([torch.cat([torch.zeros(T - len(i)), i], dim=0) for i in discount], dim=0)
+        discount =  (self.discount ** discount).unsqueeze(-1).to(device)
+        k_rewards = k_rewards / discount
+        
+        discount = [i - 1 - torch.arange(i) for i in mask_] # [B]
+        discount = torch.stack([torch.cat([torch.zeros(T - len(i)), i], dim=0) for i in discount], dim=0)
+        discount = (self.discount ** discount).to(device) # [B, T]
+        target_q = (k_rewards + (not_done * discount * target_q).unsqueeze(-1)).detach() # [B, T, 1]
+
+        critic_loss = F.mse_loss(current_q1[:, :-1][attention_mask[:, :-1]>0], target_q[:, :-1][attention_mask[:, :-1]>0]) \
+            + F.mse_loss(current_q2[:, :-1][attention_mask[:, :-1]>0], target_q[:, :-1][attention_mask[:, :-1]>0]) 
+
+        
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        if self.grad_norm > 0:
+            critic_grad_norms = nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_norm, norm_type=2)
+        self.critic_optimizer.step()
+
+        if self.warmup_steps !=0:
+            if self.step <= self.warmup_steps:
+                self.actor_lr_scheduler_warm.step()
+                self.critic_lr_scheduler_warm.step()
+            else:
+                if self.lr_decay:
+                    self.actor_lr_scheduler.step()
+                    self.critic_lr_scheduler.step()
+
+        else:
+            if self.lr_decay:
+                self.actor_lr_scheduler.step()
+                self.critic_lr_scheduler.step()
+       
+
+        '''Policy Training'''        
+        state_preds, action_preds, reward_preds = self.actor.forward(
+            states, actions, rewards, action_target, rtg[:,:-1], timesteps, attention_mask=attention_mask,
+        )
+
+        action_preds_ = action_preds.reshape(-1, action_dim)[attention_mask.reshape(-1) > 0]
+        action_target_ = action_target.reshape(-1, action_dim)[attention_mask.reshape(-1) > 0]
+        state_preds = state_preds[:, :-1]
+        state_target = states[:, 1:]
+        states_loss = ((state_preds - state_target) ** 2)[attention_mask[:, :-1]>0].mean()
+        if reward_preds is not None:
+            reward_preds = reward_preds.reshape(-1, 1)[attention_mask.reshape(-1) > 0]
+            reward_target = rewards.reshape(-1, 1)[attention_mask.reshape(-1) > 0] / self.scale
+            rewards_loss = F.mse_loss(reward_preds, reward_target)
+        else:
+            rewards_loss = 0
+        bc_loss = F.mse_loss(action_preds_, action_target_) + states_loss + rewards_loss
+
+
+
+        actor_states = states.reshape(-1, state_dim)[attention_mask.reshape(-1) > 0]
+
+        q1_new_action, q2_new_action = self.critic.get_qvalues(actor_states, action_preds_)
+        if np.random.uniform() > 0.5:
+            q_loss = - q1_new_action.mean() / q2_new_action.abs().mean().detach()
+        else:
+            q_loss = - q2_new_action.mean() / q1_new_action.abs().mean().detach()
+        actor_loss = self.eta2 * bc_loss + self.eta * q_loss
+
+
+
+
+        
+        # actor_loss = self.eta * bc_loss + q_loss
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        if self.grad_norm > 0: 
+            actor_grad_norms = nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_norm, norm_type=2)
+        self.actor_optimizer.step()
+
+        """ Step Target network """
+        self.step_ema()
+
+        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        
+        self.step += 1
+
+
+        """ log """
+        with torch.no_grad():
+            self.diagnostics['training/action_error'] = torch.mean((action_preds-action_target)**2).detach().cpu().item()
+
+        if log_writer is not None:
+            if self.grad_norm > 0:
+                log_writer.add_scalar('Actor Grad Norm', actor_grad_norms.max().item(), self.step)
+                log_writer.add_scalar('Critic Grad Norm', critic_grad_norms.max().item(), self.step)
+            log_writer.add_scalar('BC Loss', bc_loss.item(), self.step)
+            log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
+            log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
+            log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
+            log_writer.add_scalar('Actor LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+            log_writer.add_scalar('Critic LR', self.actor_optimizer.param_groups[0]['lr'], self.step)
+
+
+        loss_metric['bc_loss'].append(bc_loss.item())
+        loss_metric['ql_loss'].append(q_loss.item())
+        loss_metric['critic_loss'].append(critic_loss.item())
+        loss_metric['actor_loss'].append(actor_loss.item())
+        loss_metric['target_q_mean'].append(target_q.mean().item())  # 记录均值
+
+
+        return loss_metric
     
     

@@ -78,6 +78,10 @@ def experiment(
     clr = variant['critic_learning_rate']
     grad_norm = variant['grad_norm']
     eta = variant['eta']
+    decay_start = variant['decay_start_step']
+    warmstep = variant['warmup_steps']
+    dacay_rate = variant['decay_rate']
+    weight_decay = variant['weight_decay']
 
     if exp == 'QT' or exp == 'QT_pro':
         from decision_transformer.models.ql_DT import DecisionTransformer, Critic
@@ -87,13 +91,12 @@ def experiment(
         from decision_transformer.models.IQN_d4pg_v2 import DecisionTransformer, IQN
     elif exp == 'IQN_QT':
         from decision_transformer.models.IQN_QT_v3 import DecisionTransformer, IQN
+    elif exp == 'DIQN_QT':
+        from decision_transformer.models.DIQN_QT_v4 import DecisionTransformer, DIQN
     
 
-    log_details = f'{exp}_{env_name}_{dataset}_{timestr}_seed{seed}_lr{lr}_clr{clr}_gd{grad_norm}_eta{eta}'
-    # if variant['log_to_tensorboard']:
-    #     tensorboard_path = f'log/{exp}/{env_name}/{log_details}' 
-    # else:
-    #     tensorboard_path = None
+    log_details = f'{exp}_{env_name}_{dataset}_{timestr}_seed{seed}_lr{lr}_clr{clr}_gd{grad_norm}_eta{eta}_destart{decay_start}_derate{dacay_rate}_warmstep{warmstep}_wd{weight_decay}'
+   
 
     if env_name == 'hopper':
         dversion = 2
@@ -231,22 +234,80 @@ def experiment(
     traj_lens, returns = np.array(traj_lens), np.array(returns)
 
     # used for input normalization
+    # states = np.concatenate(states, axis=0)
+    # state_mean, state_std = np.mean(states, axis=0), np.std(states, axis=0) + 1e-6
+
+    # num_timesteps = sum(traj_lens)
+
+    # logger.log('=' * 50)
+    # logger.log(f'Starting new experiment: {env_name} {dataset}')
+    # logger.log(f'{len(traj_lens)} trajectories, {num_timesteps} timesteps found')
+    # logger.log(f'Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}')
+    # logger.log(f'Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}')
+    # logger.log('=' * 50)
+    # 归一化 returns，确保所有轨迹 return 处于 [0.1, 1] 范围内
+    returns_min = returns.min()
+    returns_mean = returns.mean()
+    returns_max = returns.max()
+    beta = 3 
+    returns_weight = ((returns - returns_min) / (returns_max - returns_min + 1e-6))
+    returns_weight = 0.3 * np.exp(beta * returns_weight) 
+    a = returns_weight.mean()
+    # used for input normalization
     states = np.concatenate(states, axis=0)
     state_mean, state_std = np.mean(states, axis=0), np.std(states, axis=0) + 1e-6
 
     num_timesteps = sum(traj_lens)
+    num_traj_1000 = np.sum(traj_lens == 1000)
+    num_traj_gt_900 = np.sum(traj_lens > 900)
+    
+    # 计算轨迹长度的分位数
+    percentile_25_len = np.percentile(traj_lens, 25)
+    median_50_len = np.percentile(traj_lens, 50)  # 也可以用 np.median(traj_lens)
+    percentile_75_len = np.percentile(traj_lens, 75)
 
-    logger.log('=' * 50)
-    logger.log(f'Starting new experiment: {env_name} {dataset}')
-    logger.log(f'{len(traj_lens)} trajectories, {num_timesteps} timesteps found')
-    logger.log(f'Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}')
-    logger.log(f'Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}')
-    logger.log('=' * 50)
+    # 计算 returns 的分位数
+    percentile_25_ret = np.percentile(returns, 25)
+    median_50_ret = np.percentile(returns, 50)  # 也可以用 np.median(returns)
+    percentile_75_ret = np.percentile(returns, 75)
+    
+    # 计算 return 大于 2500 的轨迹数量
+    num_traj_gt_2500 = np.sum(returns > 2500)
 
+    # 计算这些轨迹的总步数
+    num_steps_gt_2500 = np.sum(traj_lens[returns > 2500])
+
+    print('=' * 50)
+    print(f'Starting new experiment: {env_name} {dataset}')
+    print(f'{len(traj_lens)} trajectories, {num_timesteps} timesteps found')
+    print(f'Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}')
+    print(f'Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}')
+    print(f'Max trajectory length: {np.max(traj_lens)}')
+    print(f'Min trajectory length: {np.min(traj_lens)}')
+    print(f'Trajectory length percentiles: 25% = {percentile_25_len}, 50% (median) = {median_50_len}, 75% = {percentile_75_len}')
+    print(f'Return percentiles: 25% = {percentile_25_ret:.2f}, 50% (median) = {median_50_ret:.2f}, 75% = {percentile_75_ret:.2f}')    
+    print(f'Number of trajectories with length 1000: {num_traj_1000}')
+    print(f'Number of trajectories with length > 900: {num_traj_gt_900}')
+    print(f'Number of trajectories with return > 2500: {num_traj_gt_2500}')
+    print(f'Total timesteps in trajectories with return > 2500: {num_steps_gt_2500}')
+    print('=' * 50)
+
+
+    
     K = variant['K']
+
+    # num_traj_greater_than_K = sum(1 for length in traj_lens if length > K)
+    # total_num_traj = len(traj_lens)
+    # proportion_greater_than_K = num_traj_greater_than_K / total_num_traj
+    # proportion_greater_than_K = round(proportion_greater_than_K, 2) 
+    
+
+
     batch_size = variant['batch_size']
     num_eval_episodes = variant['num_eval_episodes']
+    # pct_traj = proportion_greater_than_K
     pct_traj = variant.get('pct_traj', 1.)
+    
 
     # only train on top pct_traj trajectories (for %BC experiment)
     num_timesteps = max(int(pct_traj*num_timesteps), 1)
@@ -274,11 +335,12 @@ def experiment(
         s, a, r, d, rtg, timesteps, mask, target_a = [], [], [], [], [], [], [], []
         for i in range(batch_size):
             traj = trajectories[int(sorted_inds[batch_inds[i]])]
-            if 'hopper-medium' in gym_name:
-                si = random.randint(0, traj['rewards'].shape[0]-K-1) 
-            else:
-                si = random.randint(0, traj['rewards'].shape[0] - 1) 
-
+            # if 'hopper-medium' in gym_name:
+            #     si = random.randint(0, traj['rewards'].shape[0]-K-1) 
+            # else:
+            #     si = random.randint(0, traj['rewards'].shape[0] - 1) 
+            
+            si = random.randint(0, traj['rewards'].shape[0]  -1) 
             # get sequences from dataset
             s.append(traj['observations'][si:si + max_len].reshape(1, -1, state_dim))
             a.append(traj['actions'][si:si + max_len].reshape(1, -1, act_dim))
@@ -386,6 +448,10 @@ def experiment(
         critic = IQN(
             state_dim, act_dim, layer_size=variant['embed_dim']
         )
+    elif exp == 'DIQN_QT':
+        critic = DIQN(
+            state_dim, act_dim, layer_size=variant['embed_dim']
+        )
 
     
     
@@ -413,9 +479,10 @@ def experiment(
         lr=variant['learning_rate'],
         clr=variant['critic_learning_rate'],
         weight_decay=variant['weight_decay'],
+        warmup_steps=variant['warmup_steps'],
         lr_decay=variant['lr_decay'],
-        lr_maxt=variant['max_iters'],
-        lr_min=variant['lr_min'],
+        decay_start_step=variant['decay_start_step'],
+        decay_rate=variant['decay_rate'],
         grad_norm=variant['grad_norm'],
         scale=scale,
         k_rewards=variant['k_rewards'],
@@ -451,8 +518,8 @@ def experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default='QT_pro')
-    parser.add_argument('--seed', type=int, default=123)
+    parser.add_argument('--exp', type=str, default='IQN_QT')
+    parser.add_argument('--seed', type=int, default=777)
     parser.add_argument('--env', type=str, default='hopper')
     parser.add_argument('--dataset', type=str, default='medium')  # medium, medium-replay, medium-expert, expert
     parser.add_argument('--mode', type=str, default='normal')  # normal for standard setting, delayed for sparse
@@ -464,17 +531,20 @@ if __name__ == '__main__':
     parser.add_argument('--n_head', type=int, default=4) # 4
     parser.add_argument('--activation_function', type=str, default='relu')
     parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) #3e-4
-    parser.add_argument('--critic_learning_rate', '-clr', type=float, default=3e-4) #3e-4
+    parser.add_argument('--learning_rate', '-lr', type=float, default=3e-4) 
+    parser.add_argument('--critic_learning_rate', '-clr', type=float, default=3e-4) 
 
-    parser.add_argument('--lr_min', type=float, default=0.)
+    parser.add_argument('--lr_min', type=float, default=1e-7)
+    parser.add_argument('--decay_start_step', type=float, default=4000)
+    parser.add_argument('--decay_rate', type=float, default=0.01)
+
     parser.add_argument('--weight_decay', '-wd', type=float, default=1e-4)
-    parser.add_argument('--warmup_steps', type=int, default=10000)
+    parser.add_argument('--warmup_steps', type=int, default=0)
     parser.add_argument('--num_eval_episodes', type=int, default=20)
     parser.add_argument('--max_iters', type=int, default=500)
     parser.add_argument('--num_steps_per_iter', type=int, default=1000)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--save_path', type=str, default='./save/')
+    parser.add_argument('--save_path', type=str, default='./debug/') ###
     parser.add_argument('--log_to_tensorboard', type=bool, default=True)
 
 
@@ -484,11 +554,11 @@ if __name__ == '__main__':
     parser.add_argument("--eta2", default=1.0, type=float)
     parser.add_argument("--lambda", default=1.0, type=float)
     parser.add_argument("--max_q_backup", action='store_true', default=False)
-    parser.add_argument("--lr_decay", action='store_true', default=True)
+    parser.add_argument("--lr_decay", action='store_true', default=False) ###
     parser.add_argument("--grad_norm", default=2.0, type=float)
     parser.add_argument("--early_stop", action='store_true', default=False)
     parser.add_argument("--early_epoch", type=int, default=100)
-    parser.add_argument("--k_rewards", action='store_true', default=True) # False
+    parser.add_argument("--k_rewards", action='store_true', default=True) 
     parser.add_argument("--use_discount", action='store_true', default=True)
     parser.add_argument("--sar", action='store_true', default=False)
     parser.add_argument("--reward_tune", default='no', type=str)

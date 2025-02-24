@@ -15,6 +15,7 @@ class Critic(nn.Module):
         self.num_atoms = num_atoms
         self.v_min = v_min
         self.v_max = v_max
+        self.delta = (self.v_max-self.v_min)/float(self.num_atoms-1)
         self.support = torch.linspace(v_min, v_max, num_atoms)
 
         self.q1_model = nn.Sequential(
@@ -86,6 +87,59 @@ class Critic(nn.Module):
         target_distribution.view(-1).index_add_(0, (upper_idx + offset).view(-1), (target_q_dist * (b - lower_idx.float())).view(-1))
 
         return target_distribution
+    
+    import torch
+
+    def reproject2(self, target_z_dist, rewards, terminates, discount, device='cuda'):
+        # 将数据转为PyTorch张量并移动到GPU
+        target_z_dist = torch.tensor(target_z_dist, dtype=torch.float32, device=device)
+        rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
+        terminates = torch.tensor(terminates, dtype=torch.bool, device=device)
+
+        # Flatten B and T dimensions into a single batch
+        batch_size = target_z_dist.shape[0]
+        T = target_z_dist.shape[1]
+        rewards = rewards.view(-1)  # Now shape: [B*T]
+        terminates = terminates.view(-1)  # Now shape: [B*T]
+
+        proj_distr = torch.zeros(batch_size * T, self.num_atoms, dtype=torch.float32, device=device)
+
+        for atom in range(self.num_atoms):
+            tz_j = torch.minimum(self.v_max, torch.maximum(self.v_min, rewards + (self.v_min + atom * self.delta) * discount))
+            b_j = (tz_j - self.v_min) / self.delta
+            l = torch.floor(b_j).to(torch.int64)
+            u = torch.ceil(b_j).to(torch.int64)
+            eq_mask = (u == l)
+
+            # Update the projection distribution for equal l and u
+            proj_distr[eq_mask, l[eq_mask]] += target_z_dist.view(-1, self.num_atoms)[eq_mask, atom]
+
+            # Update the projection distribution for unequal l and u
+            ne_mask = (u != l)
+            proj_distr[ne_mask, l[ne_mask]] += target_z_dist.view(-1, self.num_atoms)[ne_mask, atom] * (u - b_j)[ne_mask]
+            proj_distr[ne_mask, u[ne_mask]] += target_z_dist.view(-1, self.num_atoms)[ne_mask, atom] * (b_j - l)[ne_mask]
+
+        # Handling the terminates (dones)
+        proj_distr[terminates] = 0.0
+        tz_j = torch.minimum(self.v_max, torch.maximum(self.v_min, rewards[terminates]))
+        b_j = (tz_j - self.v_min) / self.delta
+        l = torch.floor(b_j).to(torch.int64)
+        u = torch.ceil(b_j).to(torch.int64)
+        eq_mask = (u == l)
+        eq_dones = terminates.clone()
+        eq_dones[terminates] = eq_mask
+        if eq_dones.any():
+            proj_distr[eq_dones, l] = 1.0
+
+        ne_mask = (u != l)
+        ne_dones = terminates.clone()
+        ne_dones[terminates] = ne_mask
+        if ne_dones.any():
+            proj_distr[ne_dones, l] = (u - b_j)[ne_mask]
+            proj_distr[ne_dones, u] = (b_j - l)[ne_mask]
+
+        return proj_distr
+
 
 
 

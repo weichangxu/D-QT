@@ -8,9 +8,9 @@ import transformers
 from decision_transformer.models.model import TrajectoryModel
 from decision_transformer.models.trajectory_gpt2 import GPT2Model
 
-class IQN(nn.Module):
+class DIQN(nn.Module):
     def __init__(self, state_size, action_size, layer_size, seed=123, N=32, dueling=False, device="cuda:0"):
-        super(IQN, self).__init__()
+        super(DIQN, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.input_shape = state_size
         self.action_size = action_size
